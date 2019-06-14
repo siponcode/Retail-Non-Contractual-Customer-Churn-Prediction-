@@ -1,0 +1,110 @@
+#Load teh required Libraries
+
+library(lubridate)
+library(tidyverse)
+#install.packages("XLConnect", dependencies = T)
+  library(XLConnect)
+library(dplyr)
+library(ggplot2)
+library(readxl)
+
+#Read the data
+raw.data = read_xlsx("Online Retail.xlsx")
+data = raw.data
+
+summary(data)
+str(data)
+
+#Create a total spend column for each day in each product
+data$Total = data$Quantity * data$UnitPrice
+
+#Create a data for transactions
+txns = data %>%
+  mutate(CustomerID = as.factor(CustomerID),
+         InvoiceDate = InvoiceDate) %>%
+  group_by(CustomerID, InvoiceNo, InvoiceDate) %>%
+  summarise(Spend = sum(Total)) %>%
+  ungroup() %>%
+  filter(Spend>0)
+
+#Calculate Time between each purchase
+time_between = txns %>%
+  arrange(CustomerID, InvoiceDate) %>%
+  group_by(CustomerID) %>%
+  mutate(dt = as.numeric(InvoiceDate - lag(InvoiceDate), unit = 'days')) %>%
+  ungroup() %>%
+  na.omit()
+
+
+#Customers who have made only 20 purchases in the data
+
+Ntrans = txns %>%
+  group_by(CustomerID) %>%
+  summarise(N = n()) %>%
+  filter(N > 20)
+
+#Function for randomly sampling Customers
+
+sample_n_groups = function(tbl, size, replace = F, weight = NULL) {
+  grps =  tbl %>% groups %>% lapply(as.character) %>% unlist
+  keep = tbl %>% summarise() %>% ungroup() %>% sample_n(size, replace, weight)
+  tbl %>% right_join(keep, by = grps) %>% group_by_(.dots = grps)
+}
+
+#Arrange distribution
+ecdf_df <- time_between %>% 
+  group_by(CustomerID) %>% 
+  arrange(dt) %>% 
+  mutate(e_cdf = 1:length(dt)/length(dt))
+
+#Extract a sampel of 20
+sample_users <- ecdf_df %>% 
+  inner_join(Ntrans, by = "CustomerID") %>% 
+  sample_n_groups(20)
+
+
+#Plot the data to understand the frequency of time-betweens
+ggplot(data = time_between %>%
+         inner_join(Ntrans, by = "CustomerID") %>%
+         filter(CustomerID %in% sample_users$CustomerID), aes(dt)) +
+  geom_histogram(aes(y = ..count../sum(..count..)), bins = 15) +
+  facet_wrap(~CustomerID)+
+  labs(x = "Time Since Last Purchase (Days)", y = "Frequency")
+
+#Check at what time the between purchases cross 20 
+
+ggplot(data = ecdf_df %>%
+         inner_join(Ntrans, by = "CustomerID") %>%
+         filter(CustomerID %in% sample_users$CustomerID), aes(dt, e_cdf)) +
+  geom_point(size = 0.5)+
+  geom_line()+
+  geom_hline(yintercept = 0.9, color = "red")+
+  geom_vline(xintercept = 20, color = "red")+
+  facet_wrap(~CustomerID)+
+  labs(x  = "Time Since Last Purchase (Days)")
+
+
+#Function to calculate 90th percentile
+
+getq = function(x, a = 0.9){
+  if(a>1 | a<0) {
+    print("Check your quantile")
+  }
+  X = sort(x)
+  e_cdf = 1:length(X)/length(X)
+  aprx = approx(e_cdf, X, xout = c(0.9))
+  return(aprx$y)
+}
+
+percentiles = time_between %>%
+  inner_join(Ntrans, by = "CustomerID") %>%
+  filter(N>5)%>%
+  group_by(CustomerID)%>%
+  summarise(percentile.90 = getq(dt))%>%
+  arrange(percentile.90)
+
+
+percentiles[which(percentiles$CustomerID == 12748),]
+
+#The model tells us: 9 times out of 10, CustomerID 12748 will make another purchase within 4.74 days, If CustomerID 12748 does not make another purchase within 4.74 days, we know that there is only a 1 in 10 chance of this happening, and that this behaviour is anomalous. At this point, we know that CustomerID 12748 begins to act “anomalously”.
+#check.1278 = data.frame(txns[which(txns$CustomerID == 12748),])
